@@ -10,7 +10,7 @@ import datetime
 
 # ========================================================================
 # Load Simulated KaRIn Data
-def loadKarinSimulated(path, maxfiles=None):
+def loadKarinSimulated(path, maxfiles=None, cycles=[], passes=[]):
     """
     Inputs:
         Path: str
@@ -25,16 +25,35 @@ def loadKarinSimulated(path, maxfiles=None):
 
     # Load filenames in path
     cycles_path = glob.glob(path)
+    
+    # Determine passes to load
+    if cycles == []:
+        PASSES = ["_"+str(s).zfill(3)+"_*" for s in passes]
+    else:
+        PASSES = ["_"+str(c).zfill(3)+"_"+str(s).zfill(3)+"_*" for c in cycles for s in passes]
+    EXTERNAL_SUBPATH = [EXTERNAL_DATA_PATH+f for f in PASSES]
+        
+    # Determine cycles for use and add to the list
+    cycles_subpath = glob.glob(EXTERNAL_SUBPATH[0])
+    for i in range(len(PASSES)):
+        if i > 0:
+            cycles_subpath += glob.glob(EXTERNAL_SUBPATH[i])
 
     # Determine if we have a max filecount
     # If we have then reduce
     if maxfiles != None:
-        cycles_path = cycles_path[:maxfiles]
+        cycles_subpath = cycles_subpath[:maxfiles]
+
+    # Print warning if list is empty
+    if cycles_subpath == []:
+        print("WARNING: no files matching criteria")
     
+    cycles_path = cycles_subpath
+
     # Setup cycles for KaRIn dictionary from filenames in path
     simkarin = {}
     for i in range(len(cycles_path)):
-        c = int(glob.glob(EXTERNAL_DATA_PATH)[i][52:56].replace("_",""))
+        c = int(cycles_path[i][52:56].replace("_",""))
         simkarin[c] = {}
 
     # For each cycle, load each pass
@@ -72,6 +91,14 @@ def loadKarinSimulated(path, maxfiles=None):
             # Convert from 0,360 to -180,180 degrees longitude
             simkarin[cyc][pas]["longitude"][simkarin[cyc][pas]["longitude"]>180] -= 360
 
+    # Create SSH
+    for c in simkarin.keys():
+        for p in simkarin[c].keys():
+            simkarin[c][p]["ssh_mss"] = simkarin[c][p]["ssha_karin"]-simkarin[c][p]["simulated_error_orbital"]#karin[c][p]["simulated_true_ssh_karin"]+karin[c][p]["simulated_error_karin"]#
+            simkarin[c][p]["ssh_mss"][simkarin[c][p]["ssha_karin"]>1e6] = np.nan
+            simkarin[c][p]["ssh_mss"][simkarin[c][p]["distance_to_coast"]==0] = np.nan
+            simkarin[c][p]["ssh_mss"][simkarin[c][p]["ssh_mss"]>1e6] = np.nan
+
     # Pass the data
     return simkarin
 # ========================================================================
@@ -97,7 +124,10 @@ def loadNadir20Hz(path, maxfiles=None, cycles=[], passes=[]):
 
     # Reduce cycles path to only contain certain cycles
     if cycles != []:
-        cycles_path = [s for s in cycles_path if "560" in s]
+        cycles_subpath = []
+        for c in cycles:
+            cycles_subpath.append([s for s in cycles_path if str(c).zfill(3) in s][0])
+        cycles_path = cycles_subpath
 
     # Determine if we have a max filecount
     # If we have then reduce
@@ -219,7 +249,10 @@ def loadNadir1Hz(path, maxfiles=None, cycles=[], passes=[]):
 
     # Reduce cycles path to only contain certain cycles
     if cycles != []:
-        cycles_path = [s for s in cycles_path if "560" in s]
+        cycles_subpath = []
+        for c in cycles:
+            cycles_subpath.append([s for s in cycles_path if str(c).zfill(3) in s][0])
+        cycles_path = cycles_subpath
 
     # Determine if we have a max filecount
     # If we have then reduce
@@ -312,16 +345,145 @@ def loadNadir1Hz(path, maxfiles=None, cycles=[], passes=[]):
 
     # Pass the data
     return nadir
-    # =========================================================================================
+# =========================================================================================
 
 
 # ========================================================================
 # Load KaRIn L2B 2km Altimetry data
+def loadKarinL2B(path, maxfiles=None, cycles=[], passes=[], useCustomKeys=True):
+
+    
+    #ex: "D:/MasterThesis/PreBetaKaRIn/expert/*"
+    EXTERNAL_DATA_PATH = path
+    
+    # Determine passes to load
+    if cycles == []:
+        PASSES = ["_"+str(s).zfill(3)+"_*" for s in passes]
+    else:
+        PASSES = ["_"+str(c).zfill(3)+"_"+str(s).zfill(3)+"_*" for c in cycles for s in passes]
+    EXTERNAL_SUBPATH = [EXTERNAL_DATA_PATH+f for f in PASSES]
+
+    # Determine cycles for use and add to the list
+    cycles_subpath = glob.glob(EXTERNAL_SUBPATH[0])
+    for i in range(len(PASSES)):
+        if i > 0:
+            cycles_subpath += glob.glob(EXTERNAL_SUBPATH[i])
+
+    # Determine if we have a max filecount
+    # If we have then reduce
+    if maxfiles != None:
+        cycles_subpath = cycles_subpath[:maxfiles]
+
+    # Print warning if list is empty
+    if cycles_subpath == []:
+        print("WARNING: no files matching criteria")
+
+    # Setup list of keys to use (to allow faster data loading)
+    CUSTOM_KEYS = ["time","latitude", "longitude", "ssh_karin", "ssh_karin_2", 
+                   "ssha_karin", "height_cor_xover", "geoid", "mean_sea_surface_cnescls", 
+                   "mean_sea_surface_dtu", "ocean_tide_fes", "solid_earth_tide", "internal_tide_hret", 
+                   "pole_tide", "dac", "distance_to_coast", "velocity_heading", 
+                   "ancillary_surface_classification_flag", "ssh_karin_2_qual"]
+    USE_CUSTOM_KEYS = useCustomKeys # <------- VARIABLE
+
+    # Setup dictionary and cycle keys
+    karin = {}
+    for i in range(len(cycles_subpath)):
+        c = int(cycles_subpath[i][63:67].replace("_",""))
+        karin[c] = {}
+
+    # Sort keys in Karin
+    keys = list(karin.keys())
+    keys.sort()
+    karin = {k: karin[k] for k in keys}
+
+    # For each cycle, load the relevant passes
+    for i, c in enumerate(list(karin.keys())):
+        print("Cycle {} {}/{}".format(c, i, len(list(karin.keys()))),end="\r")
+        SWOT_filenames = cycles_subpath
+
+        # Load example file for variables
+        SWOT_filename = SWOT_filenames[0]
+        file = nc.Dataset(SWOT_filename, "r")
+
+        # Setup dict for passes
+        karin_pass = {}
+        for i in range(len(SWOT_filenames)):
+            p = int(SWOT_filenames[i][67:71].replace("_",""))
+            karin_pass[p] = {}
+
+        # Load data for each pass
+        for i, p in enumerate(list(karin_pass.keys())):
+            #print("File {}/{}".format(i+1, len(list(karin_pass.keys()))),end="\r")
+            local_filename = glob.glob(EXTERNAL_DATA_PATH+"*"+f'{c:03d}'+"_"+f'{p:03d}'+"_*")
+            # If pass dosent exist, remove key from dict
+            if local_filename == []:
+                karin_pass.pop(p)
+                continue
+            # Load datafile
+            file = nc.Dataset(local_filename[0], "r")
+
+            # Load data for each file
+            if USE_CUSTOM_KEYS == True:
+                keys = CUSTOM_KEYS
+            else:
+                keys = file.variables.keys()
+            cyc = file.cycle_number
+            pas = file.pass_number
+
+            # Get data
+            data_ = {}
+            for k in keys:
+                data_[k] = np.ma.getdata(file[k][:])
+                karin_pass[pas] = data_
+                karin[cyc] = karin_pass
+
+            # Convert to -180 to 180 degrees longitude
+            karin[cyc][pas]["longitude"][karin[cyc][pas]["longitude"]>180] -= 360
+
+    # Compute SSH
+    print("Computing custom SSH variables")
+    for c in karin.keys():
+        for p in karin[c].keys():
+            karin[c][p]["ssh_ellip"] = np.copy(karin[c][p]["ssh_karin_2"])
+            karin[c][p]["ssh_geoid"] = np.copy(karin[c][p]["ssh_karin_2"])
+            karin[c][p]["ssh_mss"] = np.copy(karin[c][p]["ssh_karin_2"])
+
+            # With respect to Ellipsoid
+            karin[c][p]["ssh_ellip"] += karin[c][p]["height_cor_xover"]
+            # With respect to Geoid EGM2008
+            karin[c][p]["ssh_geoid"] -= karin[c][p]["geoid"]
+            karin[c][p]["ssh_geoid"] += karin[c][p]["height_cor_xover"]
+            # With respect to MSS DTU
+            karin[c][p]["ssh_mss"] -= karin[c][p]["mean_sea_surface_dtu"]
+            karin[c][p]["ssh_mss"] += karin[c][p]["height_cor_xover"]
+
+            # Geophysical corrections
+            corr = karin[c][p]["solid_earth_tide"] + \
+                karin[c][p]["ocean_tide_fes"] + \
+                karin[c][p]["internal_tide_hret"] + \
+                karin[c][p]["pole_tide"] + \
+                karin[c][p]["dac"]
+            karin[c][p]["ssh_ellip"] -= corr
+            karin[c][p]["ssh_geoid"]  -= corr
+            karin[c][p]["ssh_mss"]  -= corr
+
+            # Ocean and quality mask
+            mask1 = karin[c][p]["ancillary_surface_classification_flag"] != 0
+            mask2 = karin[c][p]["ssh_karin_2_qual"].astype(float) != 0
+            mask = np.logical_or(mask1, mask2)
+            karin[c][p]["ssh_ellip"][mask] = np.nan
+            karin[c][p]["ssh_geoid"][mask] = np.nan
+            karin[c][p]["ssh_mss"][mask] = np.nan
+
+    return karin
+# =========================================================================================
+
 
 
 # ========================================================================
 # Load KaRIn L2A 250m Altimetry data
-def loadKarinL2a(path, maxfiles=None, cycles=[], passes=[]):
+def loadKarinL2A(path, maxfiles=None, cycles=[], passes=[], latextent=[]):
     
     #ex: "D:/MasterThesis/PreBetaKaRIn_21day/unsmoothed/*"
     EXTERNAL_DATA_PATH = path
@@ -348,6 +510,7 @@ def loadKarinL2a(path, maxfiles=None, cycles=[], passes=[]):
     if cycles_subpath == []:
         print("WARNING: no files matching criteria")
 
+    # Setup dictionary and cycle keys
     karin_hr = {}
     for i in range(len(cycles_subpath)):
         c = int(cycles_subpath[i][71:75].replace("_",""))
@@ -358,21 +521,22 @@ def loadKarinL2a(path, maxfiles=None, cycles=[], passes=[]):
     keys.sort()
     karin_hr = {k: karin_hr[k] for k in keys}
 
-
+    # For each cycle load relevant passes
     for i, c in enumerate(list(karin_hr.keys())):
         print("Cycle {} {}/{}".format(c, i, len(cycles_subpath)),end="\r")
         SWOT_filenames = cycles_subpath
 
+        # Load example file for variables
         SWOT_filename = SWOT_filenames[0]
         file = nc.Dataset(SWOT_filename, "r")
 
-        file.variables
-
+        # Setup dict for passes
         karin_pass = {}
         for i in range(len(SWOT_filenames)):
             p = int(SWOT_filenames[i][75:79].replace("_",""))
             karin_pass[p] = {}
 
+        # Load data for each pass
         for i, p in enumerate(list(karin_pass.keys())):
             #print("File {}/{}".format(i+1, len(list(karin_pass.keys()))),end="\r")
             local_filename = glob.glob(EXTERNAL_DATA_PATH+"*"+f'{c:03d}'+"_"+f'{p:03d}'+"_*")
@@ -390,6 +554,14 @@ def loadKarinL2a(path, maxfiles=None, cycles=[], passes=[]):
             for side in ["left", "right"]:
                 karin_pass[pas] = {}
 
+            # If we have extent variable, determine mask
+            lat = np.ma.getdata(file["left"]["latitude"][:])
+            if latextent != []:
+                mask = np.logical_and(lat[:,20]>latextent[0],
+                                        lat[:,20]<latextent[1])
+            else:
+                mask = np.ones(lat[:,20].shape).astype(bool)
+
             # Get data
             for side in ["left", "right"]:
                 data_ = {}
@@ -397,7 +569,10 @@ def loadKarinL2a(path, maxfiles=None, cycles=[], passes=[]):
                     # Load the data and remove the margins of size 4 to keep good data
                     data_[k] = np.ma.getdata(file[side][k][:])
                     if np.ndim(data_[k]) > 1: # If we have a 2d-array we remove sides
+                        data_[k] = data_[k][mask]
                         data_[k] = data_[k][:,4:-4]
+                    else:
+                        data_[k] = data_[k][mask]
                     karin_pass[pas][side] = data_
                     karin_hr[cyc] = karin_pass
 
@@ -407,12 +582,16 @@ def loadKarinL2a(path, maxfiles=None, cycles=[], passes=[]):
 
     # Compute custom variables
     print("Computing custom SSH variables")
-    for p in karin_hr[c].keys():
-        for s in karin_hr[c][p].keys():
-            karin_hr[c][p][s]["ssh_ellip"] = karin_hr[c][p][s]["ssh_karin_2"]
-            karin_hr[c][p][s]["ssh_mss"] = karin_hr[c][p][s]["ssh_karin_2"] - karin_hr[c][p][s]["mean_sea_surface_cnescls"]
+    for c in karin_hr.keys():
+        for p in karin_hr[c].keys():
+            for s in karin_hr[c][p].keys():
+                ssh = karin_hr[c][p][s]["ssh_karin_2"]
+                ssh[ssh>1e5] = np.nan
+                karin_hr[c][p][s]["ssh_ellip"] = ssh
+                karin_hr[c][p][s]["ssh_mss"] = ssh - karin_hr[c][p][s]["mean_sea_surface_cnescls"]
 
     return karin_hr
+# =========================================================================================
 
 
 # ========================================================================
