@@ -399,3 +399,154 @@ def periodogram(X, axis=0, conf_lvl=68, sampling=2000, unit="m", tapering_f = No
 
     return psd, wavenumber, cd_interval
 # ========================================================================
+
+# ========================================================================
+# Compute the periodogram of a matrix X
+# powerSpectralDensity(ssh, sampling, unit="m", tapering_f = None, tapering=8):
+def periodogram_list(X, conf_lvl=68, sampling=2000, unit="m", tapering_f = "boxcar", tapering=8, skip_n=1):
+
+    # Make sure largest element comes first
+    X.sort(key=len, reverse=True)
+
+    N = np.array(X[0]).size
+    psd_stack = np.zeros(N//2-1)
+    k = fftfreq(N, sampling)[:N//2]
+    k *= 1000 # Convert from cpm to cpkm
+    k = k[1:]
+
+    for i in range(0,len(X),skip_n):
+        x_profile = np.array(X[i])
+
+        # Skip if empty segment
+        if (~np.isnan(x_profile)).sum() == 0:
+            continue
+
+        # Compute PSD
+        psd_, k_ = powerSpectralDensity(x_profile, sampling=sampling, unit=unit, 
+                                        tapering_f=tapering_f, tapering=tapering)
+        
+        # Fit up to N size
+        psd_temp = np.zeros(N//2-1)
+        psd_temp[:] = np.nan
+        psd_temp[(N//2-1-psd_.size):] = psd_
+
+        psd_stack = np.c_[psd_stack, psd_temp]
+    psd_stack = psd_stack[:,1:]
+
+    psd = np.nanmedian(psd_stack,axis=1)
+    conf_lvl = 68
+    cd_interval = np.nanpercentile(psd_stack,[100-conf_lvl,conf_lvl],axis=1)
+
+    return psd, k, cd_interval
+# ========================================================================
+
+
+# ========================================================================
+def karin_l2b_filtering(karin, AOI, FILTER_SIZE_KM = 20, GRID_SIZE_KM = 2, type = "design", detrend=True, detrend_type="total"):
+    filter_size = int(FILTER_SIZE_KM/GRID_SIZE_KM)
+
+    for c in karin.keys():
+        for p in karin[c].keys():
+
+            # Get segment for computation
+            lat_mask = np.logical_and(karin[c][p]["latitude"][:,0]>AOI[2], karin[c][p]["latitude"][:,0]<AOI[3])
+            heading = karin[c][p]["velocity_heading"][lat_mask]
+
+            # For each type of segment
+            for basis in ["ellip","geoid", "mss"]:
+                for lamb in ["short", "long", "full"]:
+
+                    # Get the segment which we filter
+                    x = np.copy(karin[c][p]["ssh_"+basis][lat_mask,:])
+
+                    #######
+                    # Perform filtering by FFT
+                    nanmask = np.isnan(x)
+                    # Interpolate gaps
+                    for i in range(x.shape[0]):
+                        if (~np.isnan(x[i,:])).sum() == 0:
+                            x[i,:] = 0
+                            continue
+                        x[i,nanmask[i,:]] = np.interp(np.flatnonzero(nanmask[i,:]), np.flatnonzero(~nanmask[i,:]), x[i,~nanmask[i,:]])
+                    # Detrend the data
+                    if detrend == True:
+
+                        if detrend_type == "per_line":
+                            x_mean = np.nanmedian(x)
+                            x = scipy.signal.detrend(x, axis=0)
+                            x += x_mean
+                        elif detrend_type == "total":
+                            x_idx = np.arange(x.shape[1])
+                            y = np.nanmean(x,axis=0)
+                            y_mean = np.nanmean(y)
+                            not_nan_ind = ~np.isnan(y)
+                            m, b, r_val, p_val, std_err = scipy.stats.linregress(x_idx[not_nan_ind],y[not_nan_ind]-y_mean)
+                            detrend_y = y - (m*x_idx + b)
+                            x = x - (m*x_idx + b)
+
+                    # Setup kernel for filtering
+                    if type == "design":
+                        filter_tailfactor = 3
+                        fs = GRID_SIZE_KM**(-1)
+                        hann_kern = np.hanning(filter_size)
+                        if FILTER_SIZE_KM == 10:
+                            pm_kern = scipy.signal.remez(int(filter_size*filter_tailfactor), [0, 18**(-1), 7**(-1), 0.5*fs], [1, 0], fs=fs)
+                        if FILTER_SIZE_KM == 20:
+                            pm_kern = scipy.signal.remez(int(filter_size*filter_tailfactor), [0, 30**(-1), 15**(-1), 0.5*fs], [1, 0], fs=fs)
+                        if FILTER_SIZE_KM == 30:
+                            pm_kern = scipy.signal.remez(int(filter_size*filter_tailfactor), [0, 45**(-1), 23**(-1), 0.5*fs], [1, 0], fs=fs)
+                        if FILTER_SIZE_KM == 40:
+                            pm_kern = scipy.signal.remez(int(filter_size*filter_tailfactor), [0, 60**(-1), 30**(-1), 0.5*fs], [1, 0], fs=fs)
+                        else:
+                            assert "Error, filter size is not supported"
+
+                        # Combine hann and PM filter
+                        kern = np.outer(pm_kern, hann_kern)
+                    elif type == "hann":
+                        hann_kern = np.hanning(filter_size)
+                        kern = np.outer(hann_kern, hann_kern)
+                    kern /= kern.sum()
+                    r = scipy.signal.fftconvolve(x, kern, mode="same")
+                    r[nanmask] = np.nan
+
+                    # Save filtered data
+                    ssh = x
+                    ssh[nanmask] = np.nan
+                    ssh_long = r        
+                    ssh_short = ssh - ssh_long
+
+                    if lamb == "short":
+                        ssh_filt = ssh_short
+                    elif lamb == "long":
+                        ssh_filt = ssh_long
+                    elif lamb == "full":
+                        ssh_filt = ssh
+
+                    # Add subfields
+                    keyname = "ssh_"+basis+"_"+lamb
+                    karin[c][p][keyname] = {}
+
+                    #gradient_dist = int(grad_size_km/GRID_SIZE_KM) # distance between grid cells for determening the gradient
+                    #grad_lon, grad_lat, grad_x, grad_y, grad_mag, geo_u, geo_v, geo_mag = karinGradients(ssh_filt, lon, lat, heading, grad_size, grad_size_km)
+                    
+                    # Save data
+                    karin[c][p][keyname]["lat"] = np.copy(karin[c][p]["latitude"][lat_mask,:])
+                    karin[c][p][keyname]["lon"] = np.copy(karin[c][p]["longitude"][lat_mask,:])
+                    karin[c][p][keyname]["ssh"] = ssh_filt
+
+                    #karin[c][p][keyname]["g_x"] = grad_x
+                    #karin[c][p][keyname]["g_y"] = grad_y
+                    #karin[c][p][keyname]["g_mag"] = grad_mag
+                    
+                    #karin[c][p][keyname]["g_u"] = geo_u
+                    #karin[c][p][keyname]["g_v"] = geo_v
+                    #karin[c][p][keyname]["g_uv_mag"] = geo_mag
+
+                    # Add geoid data if lambda = all
+                    #if lamb == "all":
+                    #    _, _, grad_x, grad_y, grad_mag, _, _, _ = karinGradients(egm08_filt, lon, lat, heading, grad_size, grad_size_km)
+                    #    karin[c][p][keyname]["egm_sss_x"] = grad_x
+                    #    karin[c][p][keyname]["egm_sss_y"] = grad_y
+                    #    karin[c][p][keyname]["egm_sss_mag"] = grad_mag
+
+    return karin

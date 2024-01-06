@@ -126,7 +126,7 @@ def loadNadir20Hz(path, maxfiles=None, cycles=[], passes=[]):
     if cycles != []:
         cycles_subpath = []
         for c in cycles:
-            cycles_subpath.append([s for s in cycles_path if str(c).zfill(3) in s][0])
+            cycles_subpath += ([s for s in cycles_path if str(c).zfill(3) in s])
         cycles_path = cycles_subpath
 
     # Determine if we have a max filecount
@@ -158,6 +158,8 @@ def loadNadir20Hz(path, maxfiles=None, cycles=[], passes=[]):
                     SWOT_GDR_filenames += glob.glob(EXTERNAL_SUBPATH[i])
 
         # Load first file to setup keys
+        if SWOT_GDR_filenames == []: # Skip if empty
+            continue
         SWOT_GDR_filename = SWOT_GDR_filenames[0]
         GDR_file = nc.Dataset(SWOT_GDR_filename, "r")
 
@@ -220,9 +222,24 @@ def loadNadir20Hz(path, maxfiles=None, cycles=[], passes=[]):
                         nadir[c][p]["solid_earth_tide"] +\
                         nadir[c][p]["pole_tide"] +\
                         nadir[c][p]["dac"]
-            H = nadir[c][p]["altitude"] - nadir[c][p]["range_ocean"] - nadir[c][p]["geoid"] - geocorr
+            
+            # SSH
+            H = nadir[c][p]["altitude"] - nadir[c][p]["range_ocean"] - geocorr
+            #H = nadir[c][p]["ssha"] - nadir[c][p]["mean_sea_surface_cnescls"] - geocorr
             H[abs(H)>100] = np.nan
-            nadir[c][p]["height"] = H
+            nadir[c][p]["ssh_ellip"] = H
+            
+            # SSH geoid
+            H = nadir[c][p]["altitude"] - nadir[c][p]["range_ocean"] - nadir[c][p]["geoid"] - geocorr
+            #H = nadir[c][p]["ssha"] - nadir[c][p]["mean_sea_surface_cnescls"] + nadir[c][p]["geoid"] - geocorr
+            H[abs(H)>100] = np.nan
+            nadir[c][p]["ssh_geoid"] = H
+
+            # SSHA
+            H = nadir[c][p]["altitude"] - nadir[c][p]["range_ocean"] - nadir[c][p]["mean_sea_surface_dtu"] - geocorr
+            #H = nadir[c][p]["ssha"] - nadir[c][p]["mean_sea_surface_cnescls"] + nadir[c][p]["mean_sea_surface_dtu"] - geocorr
+            H[abs(H)>100] = np.nan
+            nadir[c][p]["ssh_mss"] = H
 
     # Pass the data
     return nadir
@@ -251,7 +268,7 @@ def loadNadir1Hz(path, maxfiles=None, cycles=[], passes=[]):
     if cycles != []:
         cycles_subpath = []
         for c in cycles:
-            cycles_subpath.append([s for s in cycles_path if str(c).zfill(3) in s][0])
+            cycles_subpath += ([s for s in cycles_path if str(c).zfill(3) in s])
         cycles_path = cycles_subpath
 
     # Determine if we have a max filecount
@@ -285,6 +302,9 @@ def loadNadir1Hz(path, maxfiles=None, cycles=[], passes=[]):
                     SWOT_GDR_filenames += glob.glob(EXTERNAL_SUBPATH[i])
 
         # Load first file to setup keys
+        # Load first file to setup keys
+        if SWOT_GDR_filenames == []: # Skip if empty
+            continue
         SWOT_GDR_filename = SWOT_GDR_filenames[0]
         GDR_file = nc.Dataset(SWOT_GDR_filename, "r")
 
@@ -338,10 +358,41 @@ def loadNadir1Hz(path, maxfiles=None, cycles=[], passes=[]):
             geocorr = nadir[c][p]["ocean_tide_got"] +\
                         nadir[c][p]["solid_earth_tide"] +\
                         nadir[c][p]["pole_tide"] +\
+                        nadir[c][p]["internal_tide_hret"] +\
                         nadir[c][p]["dac"]
-            H = nadir[c][p]["altitude"] - nadir[c][p]["range_ocean"] - nadir[c][p]["geoid"] - geocorr
+            
+            # SSH
+            H = nadir[c][p]["altitude"] - nadir[c][p]["range_ocean"] - geocorr
+            #H = nadir[c][p]["ssha"] - nadir[c][p]["mean_sea_surface_cnescls"] - geocorr
             H[abs(H)>100] = np.nan
-            nadir[c][p]["height"] = H
+            # Remove subsequent data where the difference is larger than 0.5 m
+            outlier_mask = abs(np.diff(H)) < 0.5
+            outlier_mask = np.r_[outlier_mask, 1]
+            H[outlier_mask == False] = np.nan
+            # Save data
+            nadir[c][p]["ssh_ellip"] = H
+            
+            # SSH geoid
+            H = nadir[c][p]["altitude"] - nadir[c][p]["range_ocean"] - nadir[c][p]["geoid"] - geocorr
+            #H = nadir[c][p]["ssha"] - nadir[c][p]["mean_sea_surface_cnescls"] + nadir[c][p]["geoid"] - geocorr
+            H[abs(H)>100] = np.nan
+            # Remove subsequent data where the difference is larger than 0.5 m
+            outlier_mask = abs(np.diff(H)) < 0.5
+            outlier_mask = np.r_[outlier_mask, 1]
+            H[outlier_mask == False] = np.nan
+            # Save data
+            nadir[c][p]["ssh_geoid"] = H
+
+            # SSHA
+            H = nadir[c][p]["altitude"] - nadir[c][p]["range_ocean"] - nadir[c][p]["mean_sea_surface_dtu"] - geocorr
+            #H = nadir[c][p]["ssha"] - nadir[c][p]["mean_sea_surface_cnescls"] + nadir[c][p]["mean_sea_surface_dtu"] - geocorr
+            H[abs(H)>100] = np.nan
+            # Remove subsequent data where the difference is larger than 0.5 m
+            outlier_mask = abs(np.diff(H)) < 0.5
+            outlier_mask = np.r_[outlier_mask, 1]
+            H[outlier_mask == False] = np.nan
+            # Save data
+            nadir[c][p]["ssh_mss"] = H
 
     # Pass the data
     return nadir
