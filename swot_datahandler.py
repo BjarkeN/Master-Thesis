@@ -401,7 +401,7 @@ def loadNadir1Hz(path, maxfiles=None, cycles=[], passes=[]):
 
 # ========================================================================
 # Load KaRIn L2B 2km Altimetry data
-def loadKarinL2B(path, maxfiles=None, cycles=[], passes=[], useCustomKeys=True):
+def loadKarinL2B(path, maxfiles=None, cycles=[], passes=[], useCustomKeys=True, dist2coast=0):
 
     
     #ex: "D:/MasterThesis/PreBetaKaRIn/expert/*"
@@ -522,7 +522,9 @@ def loadKarinL2B(path, maxfiles=None, cycles=[], passes=[], useCustomKeys=True):
             # Ocean and quality mask
             mask1 = karin[c][p]["ancillary_surface_classification_flag"] != 0
             mask2 = karin[c][p]["ssh_karin_2_qual"].astype(float) != 0
+            mask3 = karin[c][p]["distance_to_coast"].astype(float) < dist2coast*1e3
             mask = np.logical_or(mask1, mask2)
+            mask = np.logical_or(mask, mask3)
             karin[c][p]["ssh_ellip"][mask] = np.nan
             karin[c][p]["ssh_geoid"][mask] = np.nan
             karin[c][p]["ssh_mss"][mask] = np.nan

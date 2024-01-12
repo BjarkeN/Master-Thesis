@@ -509,6 +509,17 @@ def karin_l2b_filtering(karin, AOI, FILTER_SIZE_KM = 20, GRID_SIZE_KM = 2, type 
                     r = scipy.signal.fftconvolve(x, kern, mode="same")
                     r[nanmask] = np.nan
 
+                    # Set edges to nan
+                    left_edge = 4
+                    kern_edge = kern.shape[1]//2-1
+                    center_line = r.shape[1]//2
+
+                    r[:, :left_edge+kern_edge] = np.nan # Remove left edge
+                    r[:, center_line-kern_edge-left_edge+2:center_line+left_edge+kern_edge] = np.nan # Remove center
+                    r[:, -(left_edge+kern_edge-1):] = np.nan # Remove right edge
+                    r[:kern_edge, :] = np.nan # Remove top
+                    r[-kern_edge+1:, :] = np.nan # Remove bottom
+
                     # Save filtered data
                     ssh = x
                     ssh[nanmask] = np.nan
@@ -521,6 +532,11 @@ def karin_l2b_filtering(karin, AOI, FILTER_SIZE_KM = 20, GRID_SIZE_KM = 2, type 
                         ssh_filt = ssh_long
                     elif lamb == "full":
                         ssh_filt = ssh
+                        egm08 = np.copy(karin[c][p]["geoid"][lat_mask,:])
+
+                    # Remove data at ends of segments (removed due to long computation time)
+                    #dist2nan = np.array([zero_dist((~np.isnan(ssh_filt[:,s]))) for s in range(ssh_filt.shape[1])]).T
+                    #ssh_filt[dist2nan<kern.shape[0]] = np.nan
 
                     # Add subfields
                     keyname = "ssh_"+basis+"_"+lamb
@@ -534,19 +550,91 @@ def karin_l2b_filtering(karin, AOI, FILTER_SIZE_KM = 20, GRID_SIZE_KM = 2, type 
                     karin[c][p][keyname]["lon"] = np.copy(karin[c][p]["longitude"][lat_mask,:])
                     karin[c][p][keyname]["ssh"] = ssh_filt
 
-                    #karin[c][p][keyname]["g_x"] = grad_x
-                    #karin[c][p][keyname]["g_y"] = grad_y
-                    #karin[c][p][keyname]["g_mag"] = grad_mag
+                    ################################################
+                    # Determine gradients
+                    lat = karin[c][p][keyname]["lat"]
+                    grad_x, grad_y, grad_mag, ssc_u, ssc_v, ssc_mag = karinGradients(ssh_filt, heading, lat, GRID_SIZE_KM)
+
+                    karin[c][p][keyname]["sss_x"] = grad_x
+                    karin[c][p][keyname]["sss_y"] = grad_y
+                    karin[c][p][keyname]["sss_mag"] = grad_mag
                     
-                    #karin[c][p][keyname]["g_u"] = geo_u
-                    #karin[c][p][keyname]["g_v"] = geo_v
-                    #karin[c][p][keyname]["g_uv_mag"] = geo_mag
+                    karin[c][p][keyname]["ssc_u"] = ssc_u
+                    karin[c][p][keyname]["ssc_v"] = ssc_v
+                    karin[c][p][keyname]["ssc_mag"] = ssc_mag
 
                     # Add geoid data if lambda = all
-                    #if lamb == "all":
-                    #    _, _, grad_x, grad_y, grad_mag, _, _, _ = karinGradients(egm08_filt, lon, lat, heading, grad_size, grad_size_km)
-                    #    karin[c][p][keyname]["egm_sss_x"] = grad_x
-                    #    karin[c][p][keyname]["egm_sss_y"] = grad_y
-                    #    karin[c][p][keyname]["egm_sss_mag"] = grad_mag
+                    if lamb == "full":
+                        grad_x, grad_y, grad_mag, _, _, _ = karinGradients(egm08, heading, lat, GRID_SIZE_KM)
+                        karin[c][p][keyname]["egm_sss_x"] = grad_x
+                        karin[c][p][keyname]["egm_sss_y"] = grad_y
+                        karin[c][p][keyname]["egm_sss_mag"] = grad_mag
 
     return karin
+
+def karinGradients(X, heading, lat, GRID_SIZE_KM):
+    grad_along, grad_cross = np.gradient(X)
+    N, M = X.shape
+
+    # Gradient Cross and Along-track
+    grad_cross /= GRID_SIZE_KM # Convert unit to m / km
+    grad_along /= GRID_SIZE_KM # Convert unit to m / km
+
+    # Convert gradients to N and E coordinates
+    orbit_angle = np.deg2rad(heading)
+    #orbit_angle = orbit_angle[margins[0]:N-margins[1]]
+    orbit_angle = np.repeat(orbit_angle[:,np.newaxis], axis=1, repeats=M)#-np.sum(margins))
+
+    # Correct direction
+    heading_mean = np.nanmedian(heading)
+    # Angle with respect to true north of the horizontal component of the spacecraft Earth-relative velocity vector.
+    # Values between 0 and 90 deg indicate that the velocity vector has a northward component, 
+    # and values between 90 and 180 deg indicate that the velocity vector has a southward component.
+
+    if heading_mean > 90: # Southward
+        correction_angle = np.deg2rad(180) - orbit_angle
+        # Along track
+        grad_along_x = grad_along*np.sin(correction_angle)
+        grad_along_y = -grad_along*np.cos(correction_angle)
+
+        # Cross track
+        grad_cross_x = -grad_cross*np.cos(correction_angle)
+        grad_cross_y = -grad_cross*np.sin(correction_angle)
+
+    else:                 # Northward
+        # Along track
+        grad_along_x = grad_along*np.sin(orbit_angle)
+        grad_along_y = grad_along*np.cos(orbit_angle)
+
+        # Cross track
+        grad_cross_x = grad_cross*np.cos(orbit_angle)
+        grad_cross_y = -grad_cross*np.sin(orbit_angle)
+
+    # Combine components
+    grad_x = grad_cross_x + grad_along_x
+    grad_y = grad_cross_y + grad_along_y
+
+    grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+
+    # Surface Geostrophic current
+    Omega = 7.292*10**(-5) # From Steward 2008 p. 108 # s^-1
+    R = 6371*1e3
+    g = 9.82 # m/s^2
+    f = 2*Omega * np.sin(np.deg2rad(lat))
+
+    ssc_u = -g/(f) * (grad_y/1000) # convert gradient to m/m and multiply by factor
+    ssc_v = g/(f) * (grad_x/1000) # convert gradient to m/m and multiply by factor
+    ssc_mag = np.sqrt(ssc_u**2 + ssc_v**2)
+
+    # Convert gradient from m/km to micro-radians
+    grad_x *= 1000
+    grad_y *= 1000
+    grad_mag *= 1000
+    
+    return grad_x, grad_y, grad_mag, ssc_u, ssc_v, ssc_mag
+
+def zero_dist(lst):
+    # From https://stackoverflow.com/questions/75707773/finding-the-distance-to-the-nearest-0-in-a-list
+    # User Samwise
+    zeroes = [i for i, val in enumerate(lst) if val == 0]
+    return [min(abs(i - z) for z in zeroes) for i in range(len(lst))]
